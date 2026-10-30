@@ -94,8 +94,4 @@ router.patch(
     mongoIdValidator,
     productController.toggleFeatured
 );
-
-router.get('/debug/all', productController.debugGetAll);
-router.get('/debug/inspector', productController.debugQueryInspector);
-
 export default router;

@@ -369,32 +369,6 @@ export const getAllProducts = async (req, res, next) => {
     }
 };
 
-/**
- * Debug: Get all products
- * GET /api/products/debug/all
- */
-export const debugGetAll = async (req, res, next) => {
-    try {
-        const result = await productService.getAllProducts({ limit: 100 });
-        return successResponse(res, result, 'Debug All Products');
-    } catch (error) {
-        next(error);
-    }
-};
-
-export const debugQueryInspector = (req, res, next) => {
-    try {
-        const result = productService.inspectQuery({
-            ...req.query,
-            categories: req.query.categories,
-            minPrice: req.query.minPrice,
-            maxPrice: req.query.maxPrice
-        });
-        return successResponse(res, result, 'Query Inspection');
-    } catch (error) {
-        next(error);
-    }
-};
 
 /**
  * Get featured products (Admin-curated)

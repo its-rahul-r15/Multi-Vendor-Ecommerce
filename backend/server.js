@@ -19,15 +19,14 @@ const app = express();
 
 app.set('trust proxy', 1);
 app.use(helmet());
+const envOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:3000').split(',').map(s => s.trim());
 const allowedOrigins = [
-    'https://e-commerce-hack-tau.vercel.app',
-    'http://localhost:5173',
+    ...envOrigins,
     process.env.FRONTEND_URL,
 ].filter(Boolean);
 
 app.use(cors({
     origin: (origin, callback) => {
-
         if (!origin) return callback(null, true);
 
         if (allowedOrigins.includes(origin)) {
@@ -40,8 +39,8 @@ app.use(cors({
     credentials: true,
 }));
 app.use(compression());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 app.use(mongoSanitize());
 
 

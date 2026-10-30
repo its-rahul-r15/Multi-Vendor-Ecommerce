@@ -14,16 +14,39 @@ import Order from '../models/Order.js';
  * @access  Private (Customer)
  */
 export const createOrder = asyncHandler(async (req, res) => {
-    const { orderId, amount } = req.body;
+    const { orderId } = req.body;
 
-    if (!orderId || !amount) {
+    if (!orderId) {
         return res.status(400).json({
             success: false,
-            error: 'Order ID and amount are required',
+            error: 'Order ID is required',
         });
     }
 
+    const order = await Order.findById(orderId);
+    if (!order) {
+        return res.status(404).json({ success: false, error: 'Order not found' });
+    }
+
+    // Ensure order belongs to caller or caller is admin
+    if (order.customerId.toString() !== req.user.userId && req.user.role !== 'admin') {
+        return res.status(403).json({ success: false, error: 'Unauthorized access to this order' });
+    }
+
+    if (order.paymentStatus === 'paid') {
+        return res.status(400).json({ success: false, error: 'Order is already paid' });
+    }
+
+    // Take amount strictly from server order (prevent client tampering)
+    const amount = order.totalAmount;
     const razorpayOrder = await paymentService.createRazorpayOrder(amount, orderId);
+
+    // Store razorpayOrderId on the order
+    order.payment = {
+        ...order.payment,
+        razorpayOrderId: razorpayOrder.id,
+    };
+    await order.save();
 
     res.status(200).json({
         success: true,
@@ -52,15 +75,30 @@ export const verifyPayment = asyncHandler(async (req, res) => {
         });
     }
 
-    const order = await paymentService.processSuccessfulPayment(orderId, {
+    const order = await Order.findById(orderId);
+    if (!order) {
+        return res.status(404).json({ success: false, error: 'Order not found' });
+    }
+
+    // Verify caller ownership
+    if (order.customerId.toString() !== req.user.userId && req.user.role !== 'admin') {
+        return res.status(403).json({ success: false, error: 'Unauthorized to verify this order' });
+    }
+
+    // Verify razorpayOrderId matches what was stored on the order
+    if (order.payment?.razorpayOrderId && order.payment.razorpayOrderId !== razorpayOrderId) {
+        return res.status(400).json({ success: false, error: 'Razorpay order ID mismatch' });
+    }
+
+    const updatedOrder = await paymentService.processSuccessfulPayment(orderId, {
         razorpayOrderId,
         razorpayPaymentId,
         razorpaySignature,
     });
 
     // Track purchase analytics for each item (fire-and-forget)
-    if (order?.items) {
-        for (const item of order.items) {
+    if (updatedOrder?.items) {
+        for (const item of updatedOrder.items) {
             ProductAnalytics.recordPurchase(
                 item.productId,
                 item.quantity,
@@ -71,7 +109,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 
     res.status(200).json({
         success: true,
-        data: order,
+        data: updatedOrder,
         message: 'Payment verified successfully',
     });
 });
@@ -109,6 +147,9 @@ export const getPaymentDetails = asyncHandler(async (req, res) => {
     const { paymentId } = req.params;
 
     const payment = await paymentService.getPaymentDetails(paymentId);
+    if (!payment) {
+        return res.status(404).json({ success: false, error: 'Payment details not found' });
+    }
 
     res.status(200).json({
         success: true,

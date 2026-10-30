@@ -28,6 +28,13 @@ export const getStats = async (req, res, next) => {
             (await import('../models/Shop.js')).default.countDocuments({ status: 'pending' }),
         ]);
 
+        const OrderModel = (await import('../models/Order.js')).default;
+        const gmvAggregation = await OrderModel.aggregate([
+            { $group: { _id: null, total: { $sum: '$totalAmount' } } },
+        ]);
+        const gmv = gmvAggregation[0]?.total || 0;
+        const commissionEarned = Math.round(gmv * 0.085);
+
         const statistics = {
             totalUsers,
             totalCustomers,
@@ -37,11 +44,13 @@ export const getStats = async (req, res, next) => {
             pendingShops,
             totalProducts,
             totalOrders,
+            gmv,
+            commissionEarned,
         };
 
         return successResponse(
             res,
-            { statistics },
+            { statistics, gmv, commissionEarned, totalUsers, approvedShops, totalOrders },
             'Platform statistics retrieved successfully'
         );
     } catch (error) {

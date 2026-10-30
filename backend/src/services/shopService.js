@@ -20,10 +20,14 @@ export const createShop = async (sellerId, shopData) => {
         throw new Error('You already have a shop registered');
     }
 
-    // Verify user is a seller
+    // Verify user exists and upgrade role to seller if needed
     const user = await User.findById(sellerId);
-    if (!user || user.role !== 'seller') {
-        throw new Error('Only sellers can create shops');
+    if (!user) {
+        throw new Error('User not found');
+    }
+    if (user.role !== 'seller' && user.role !== 'admin') {
+        user.role = 'seller';
+        await user.save();
     }
 
     // Create shop with pending status

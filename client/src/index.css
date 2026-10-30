@@ -1,1 +1,123 @@
 @import "tailwindcss";
+
+@layer base {
+  :root {
+    /* ── Centralized Theme Variables: Dark Pink & Pinkish White ──────────────── */
+    --color-primary: #e00f66;             /* Luxurious Dark Pink / Deep Rose */
+    --color-primary-hover: #9d174d;       /* Rich Darker Pink hover */
+    --color-primary-light: #fdf2f8;       /* Soft delicate blush / pinkish white */
+    --color-primary-subtle: #fbcfe8;      /* Soft pink accent border */
+
+    --color-secondary: #24141d;           /* Deep elegant plum-black */
+    --color-secondary-hover: #150a10;
+
+    --color-accent-indigo: #4f46e5;       /* Escrow protection accent */
+    --color-accent-emerald: #059669;      /* Verified badge */
+    --color-accent-amber: #d97706;        /* Rating stars */
+
+    --color-bg-base: #fef7f9;             /* Luminous, clean pinkish-white background */
+    --color-surface: #ffffff;             /* Pure white card surface */
+    --color-surface-hover: #fdf2f6;       /* Soft pinkish card hover */
+    --color-border: #f2d5e0;             /* Soft refined pinkish border */
+    --color-border-subtle: #fcebf2;
+
+    --color-text-main: #2b141e;           /* Deep plum charcoal for high readability */
+    --color-text-body: #63434f;           /* Warm plum-slate body text */
+    --color-text-muted: #8f6d7a;          /* Soft plum-muted metadata */
+
+    /* Typography */
+    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-serif: 'Newsreader', Georgia, Cambria, 'Times New Roman', Times, serif;
+  }
+
+  body {
+    background-color: var(--color-bg-base);
+    color: var(--color-text-main);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+
+  .font-serif {
+    font-family: var(--font-serif);
+  }
+}
+
+/* ── Centralized Utility Classes Using The Variables ────────────────────────── */
+.bg-brand-primary { background-color: var(--color-primary); }
+.bg-brand-primary:hover { background-color: var(--color-primary-hover); }
+.bg-brand-primary-light { background-color: var(--color-primary-light); }
+.bg-brand-primary-subtle { background-color: var(--color-primary-subtle); }
+.text-brand-primary { color: var(--color-primary); }
+.text-brand-primary:hover { color: var(--color-primary-hover); }
+.border-brand-primary { border-color: var(--color-primary); }
+.border-brand-primary-subtle { border-color: var(--color-primary-subtle); }
+.ring-brand-primary { --tw-ring-color: var(--color-primary); }
+
+.bg-brand-surface { background-color: var(--color-surface); }
+.border-brand-border { border-color: var(--color-border); }
+.text-brand-main { color: var(--color-text-main); }
+.text-brand-body { color: var(--color-text-body); }
+.text-brand-muted { color: var(--color-text-muted); }
+
+/* Custom Scrollbar in Dark Pink / Pinkish White tones */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #fdf2f8;
+}
+::-webkit-scrollbar-thumb {
+  background: #f472b6;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #db2777;
+}
+
+/* Glassmorphism & Soft Shadows with delicate pink tints */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(242, 213, 224, 0.9);
+}
+
+.card-subtle {
+  background: #ffffff;
+  border: 1px solid var(--color-border);
+  box-shadow: 0 1px 3px 0 rgba(190, 24, 93, 0.03), 0 1px 2px -1px rgba(190, 24, 93, 0.03);
+  transition: all 0.2s ease-in-out;
+}
+
+.card-subtle:hover {
+  box-shadow: 0 12px 28px -5px rgba(190, 24, 93, 0.09), 0 8px 10px -6px rgba(190, 24, 93, 0.05);
+  border-color: #f472b6;
+}
+
+/* Animation utilities */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Line clamp helpers */
+.line-clamp-1 {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

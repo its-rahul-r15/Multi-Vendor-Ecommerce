@@ -295,8 +295,12 @@ export const createCouponValidator = [
 
 
 export const paymentCreateOrderValidator = [
+    body('orderId')
+        .notEmpty().withMessage('Order ID is required')
+        .isMongoId().withMessage('Invalid order ID format'),
+
     body('amount')
-        .notEmpty().withMessage('Amount is required')
+        .optional()
         .isFloat({ min: 1 }).withMessage('Amount must be at least 1'),
 
     body('currency')

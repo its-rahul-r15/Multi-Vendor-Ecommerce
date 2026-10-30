@@ -21,14 +21,14 @@ export const createOrder = async (customerId, orderData) => {
     // Get customer's cart — populate product AND product's shopId
     const cart = await Cart.findOne({ customerId }).populate({
         path: 'items.productId',
-        populate: { path: 'shopId', select: '_id shopName location' },
+        populate: { path: 'shopId', select: '_id shopName location sellerId' },
     });
 
     if (!cart || cart.items.length === 0) {
         throw new Error('Cart is empty');
     }
 
-    // Route each item to the nearest vendor with stock
+    // Route each item to vendor
     const itemsByShop = {};
 
     for (const item of cart.items) {
@@ -38,14 +38,19 @@ export const createOrder = async (customerId, orderData) => {
             throw new Error(`Product ${product?.name || 'unknown'} is not available`);
         }
 
+        // Prevent sellers from buying their own products (Phase 0 item 7)
+        if (product.shopId?.sellerId && product.shopId.sellerId.toString() === customerId.toString()) {
+            throw new Error(`Sellers cannot purchase products from their own shop: ${product.name}`);
+        }
+
         if (product.stock < item.quantity) {
             throw new Error(`Insufficient stock for ${product.name}. Only ${product.stock} available`);
         }
 
-        // Find the nearest vendor/shop that has this product with enough stock
+        // Route by selected vendor, or optionally nearest vendor if ENABLE_NEAREST_ROUTING is explicitly true
         let assignedShopId = null;
 
-        if (deliveryCoordinates && deliveryCoordinates.length === 2) {
+        if (process.env.ENABLE_NEAREST_ROUTING === 'true' && deliveryCoordinates && deliveryCoordinates.length === 2) {
             // Find all products with the same name & category across all shops
             const matchingProducts = await Product.find({
                 name: product.name,
