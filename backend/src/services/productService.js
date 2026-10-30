@@ -1,0 +1,857 @@
+import Product from '../models/Product.js';
+import Shop from '../models/Shop.js';
+import Order from '../models/Order.js';
+import { deleteCache, deleteCachePattern, setCache, getCache } from './cacheService.js';
+
+/**
+ * Product Service
+ * Business logic for product management
+ */
+
+/**
+ * Create a new product (Seller only)
+ * @param {string} sellerId - Seller user ID
+ * @param {Object} productData - Product details
+ * @returns {Promise<Object>} Created product
+ */
+// Helper to inspect query for debugging
+export const inspectQuery = (filters = {}) => {
+    const {
+        category,
+        categories,
+        subCategory,
+        brand,
+        sizes,
+        colors,
+        style,
+        shopId,
+        minPrice,
+        maxPrice,
+        search,
+        sort = '-createdAt',
+    } = filters;
+
+    const query = {
+        isAvailable: true,
+        isBanned: false,
+    };
+
+    if (categories) {
+        const catList = Array.isArray(categories) ? categories : categories.split(',');
+        if (catList.length > 0) query.category = { $in: catList };
+    } else if (category) {
+        query.category = category;
+    }
+
+    if (subCategory) query.subCategory = subCategory;
+    if (brand) query.brand = brand;
+    if (style) query.style = style;
+
+    if (minPrice || maxPrice) {
+        const discountedCond = {};
+        const priceCond = {};
+        if (minPrice) { discountedCond.$gte = Number(minPrice); priceCond.$gte = Number(minPrice); }
+        if (maxPrice) { discountedCond.$lte = Number(maxPrice); priceCond.$lte = Number(maxPrice); }
+        
+        query.$or = [
+            { discountedPrice: { $gt: 0, ...discountedCond } },
+            {
+                $or: [
+                    { discountedPrice: { $exists: false } },
+                    { discountedPrice: null },
+                    { discountedPrice: 0 }
+                ],
+                price: priceCond
+            }
+        ];
+    }
+
+    if (sizes) {
+        const sizeList = Array.isArray(sizes) ? sizes : sizes.split(',').filter(s => s.trim());
+        if (sizeList.length > 0) query.sizes = { $in: sizeList };
+    }
+    if (colors) {
+        const colorList = Array.isArray(colors) ? colors : colors.split(',').filter(c => c.trim());
+        if (colorList.length > 0) query.colors = { $in: colorList };
+    }
+    if (shopId) query.shopId = shopId;
+    if (search) query.$text = { $search: search };
+
+    return { filters, mongoQuery: query };
+};
+
+export const createProduct = async (user, productData) => {
+    let shopId;
+    if (user.role === 'admin') {
+        if (!productData.shopId) {
+            throw new Error('shopId is required for admin to create a product');
+        }
+        const shop = await Shop.findOne({ _id: productData.shopId, status: 'approved' });
+        if (!shop) {
+            throw new Error('Selected shop is not approved or does not exist');
+        }
+        shopId = shop._id;
+    } else {
+        // Get seller's shop
+        const shop = await Shop.findOne({ sellerId: user.userId, status: 'approved' });
+        if (!shop) {
+            throw new Error('You must have an approved shop to add products');
+        }
+        shopId = shop._id;
+    }
+
+    // Create product linked to shop
+    const product = await Product.create({
+        ...productData,
+        shopId,
+    });
+
+    // Invalidate product list caches
+    await deleteCachePattern('products:*');
+    await deleteCachePattern(`shop:${shopId}:products:*`);
+
+    return product;
+};
+
+/**
+ * Get products with pagination and filters
+ * @param {Object} filters - Filter options (category, shopId, search, page, limit, sort)
+ * @returns {Promise<Object>} Products with pagination
+ */
+export const getProducts = async (filters = {}) => {
+    const {
+        category,
+        categories, // Support multiple categories
+        subCategory,
+        brand,
+        sizes,
+        colors,
+        style,
+        shopId,
+        minPrice,
+        maxPrice,
+        attributes,
+        search,
+        page = 1,
+        limit = 20,
+        sort = '-createdAt',
+    } = filters;
+
+    const skip = (page - 1) * limit;
+
+    // Build query
+    const query = {
+        isAvailable: true,
+        isBanned: false, // Don't show banned products
+    };
+
+    // Category filter (support single or multiple)
+    if (categories) {
+        // Handle if comma-separated string or array
+        const catList = Array.isArray(categories) ? categories : categories.split(',');
+        if (catList.length > 0) query.category = { $in: catList };
+    } else if (category) {
+        query.category = category;
+    }
+
+    if (subCategory) query.subCategory = subCategory;
+    if (brand) query.brand = brand;
+    if (style) query.style = style; // Current UI uses 'style' as regex/exact match
+
+    // Price Filter — check discountedPrice (selling price) first, fallback to original price
+    let priceFilter = null;
+    if (minPrice || maxPrice) {
+        const discountedCond = {};
+        const priceCond = {};
+        if (minPrice) { discountedCond.$gte = Number(minPrice); priceCond.$gte = Number(minPrice); }
+        if (maxPrice) { discountedCond.$lte = Number(maxPrice); priceCond.$lte = Number(maxPrice); }
+        
+        priceFilter = {
+            $or: [
+                { discountedPrice: { $gt: 0, ...discountedCond } },
+                {
+                    $or: [
+                        { discountedPrice: { $exists: false } },
+                        { discountedPrice: null },
+                        { discountedPrice: 0 }
+                    ],
+                    price: priceCond
+                }
+            ]
+        };
+    }
+
+    // Full-text search — multi-word AND logic (all words must match in name/category/tags)
+    // Does NOT search description to avoid false matches
+    if (search) {
+        const words = search.trim().split(/\s+/).filter(w => w.length > 1);
+        const wordConditions = words.map(word => ({
+            $or: [
+                { name: { $regex: word, $options: 'i' } },
+                { category: { $regex: word, $options: 'i' } },
+                { subCategory: { $regex: word, $options: 'i' } },
+                { tags: { $in: [new RegExp(word, 'i')] } },
+                { brand: { $regex: word, $options: 'i' } },
+            ],
+        }));
+
+        // Combine search AND price into $and array
+        const andConditions = [...wordConditions];
+        if (priceFilter) andConditions.push(priceFilter);
+
+        if (andConditions.length === 1) {
+            // Single word, no price: merge $or directly into query
+            Object.assign(query, andConditions[0]);
+        } else {
+            query.$and = andConditions;
+        }
+    } else if (priceFilter) {
+        // Price filter only (no search term)
+        query.$or = priceFilter.$or;
+    }
+
+    // Array filters
+    // Array filters (Sizes and Colors)
+    if (sizes) {
+        const sizeList = Array.isArray(sizes) ? sizes : sizes.split(',').filter(s => s.trim());
+        if (sizeList.length > 0) query.sizes = { $in: sizeList };
+    }
+    if (colors) {
+        const colorList = Array.isArray(colors) ? colors : colors.split(',').filter(c => c.trim());
+        if (colorList.length > 0) query.colors = { $in: colorList };
+    }
+    
+    // Dynamic attributes filter
+    if (attributes) {
+        let parsedAttributes = attributes;
+        if (typeof attributes === 'string') {
+            try {
+                parsedAttributes = JSON.parse(attributes);
+            } catch (e) {
+                parsedAttributes = {};
+            }
+        }
+        for (const [key, values] of Object.entries(parsedAttributes)) {
+            if (Array.isArray(values) && values.length > 0) {
+                query[`attributes.${key}`] = { $in: values };
+            } else if (typeof values === 'string') {
+                query[`attributes.${key}`] = values;
+            }
+        }
+    }
+
+    if (shopId) query.shopId = shopId;
+
+    // Try cache (only for non-search queries)
+    const cacheKey = `products:${JSON.stringify({ categories, subCategory, brand, sizes, colors, style, shopId, page, limit, sort, minPrice, maxPrice, attributes })}`;
+
+    if (!search) {
+        const cached = await getCache(cacheKey);
+        if (cached) {
+            return JSON.parse(cached);
+        }
+    }
+
+    // Execute query
+    const [products, total] = await Promise.all([
+        Product.find(query)
+            .populate('shopId', 'shopName location rating')
+            .sort(sort || '-createdAt') // Pass default if sort is falsy/empty string
+            .skip(skip)
+            .limit(limit)
+            .lean(), // Convert to plain objects - 50% faster!
+        Product.countDocuments(query),
+    ]);
+
+    const result = {
+        products,
+        pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.ceil(total / limit),
+        },
+    };
+
+    // Cache for 5 minutes (if not search)
+    if (!search) {
+        await setCache(cacheKey, JSON.stringify(result), 300);
+    }
+
+    return result;
+};
+
+/**
+ * Search products by keyword using advanced multi-word regex
+ * Each word is matched independently across all fields (AND logic)
+ * Special regex characters are escaped for safety
+ * @param {string} keyword - Search keyword (can be multi-word)
+ * @param {number} page - Page number
+ * @param {number} limit - Items per page
+ * @returns {Promise<Object>} Search results
+ */
+export const searchProducts = async (keyword, page = 1, limit = 20) => {
+    const skip = (page - 1) * limit;
+
+    // Escape special regex characters to prevent injection
+    const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // Split into words, filter short/empty ones
+    const words = keyword.trim().split(/\s+/).filter(w => w.length > 0);
+
+    // Build AND conditions: every word must match at least one field
+    const wordConditions = words.map(word => {
+        const safeWord = escapeRegex(word);
+        const regex = { $regex: safeWord, $options: 'i' };
+        return {
+            $or: [
+                { name: regex },
+                { description: regex },
+                { category: regex },
+                { subCategory: regex },
+                { brand: regex },
+                { style: regex },
+                { tags: { $in: [new RegExp(safeWord, 'i')] } },
+            ],
+        };
+    });
+
+    const query = {
+        isAvailable: true,
+        isBanned: false,
+    };
+
+    // If single word, use $or directly; if multi-word, use $and for all words
+    if (wordConditions.length === 1) {
+        Object.assign(query, wordConditions[0]);
+    } else if (wordConditions.length > 1) {
+        query.$and = wordConditions;
+    }
+
+    const [products, total] = await Promise.all([
+        Product.find(query)
+            .populate('shopId', 'shopName location rating')
+            .sort('-createdAt')
+            .skip(skip)
+            .limit(limit)
+            .select('-__v')
+            .lean(),
+        Product.countDocuments(query),
+    ]);
+
+    return {
+        products,
+        pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.ceil(total / limit),
+        },
+    };
+};
+
+/**
+ * Get product by ID
+ * @param {string} productId - Product ID
+ * @returns {Promise<Object>} Product details
+ */
+export const getProductById = async (productId) => {
+    const cacheKey = `product:${productId}`;
+
+    // Try cache
+    const cached = await getCache(cacheKey);
+    if (cached) {
+        return JSON.parse(cached);
+    }
+
+    const product = await Product.findById(productId)
+        .populate('shopId', 'shopName address phone rating location');
+
+    if (!product) {
+        throw new Error('Product not found');
+    }
+
+    // Don't show banned or unavailable products to customers
+    if (product.isBanned || !product.isAvailable) {
+        throw new Error('Product not available');
+    }
+
+    // Cache for 10 minutes
+    await setCache(cacheKey, JSON.stringify(product), 600);
+
+    return product;
+};
+
+/**
+ * Get products for a specific shop
+ * @param {string} shopId - Shop ID
+ * @param {number} page - Page number
+ * @param {number} limit - Items per page
+ * @returns {Promise<Object>} Shop's products
+ */
+export const getShopProducts = async (shopId, page = 1, limit = 20) => {
+    return getProducts({ shopId, page, limit });
+};
+
+/**
+ * Get seller's products (including unavailable ones)
+ * @param {string} sellerId - Seller user ID
+ * @param {number} page - Page number
+ * @param {number} limit - Items per page
+ * @returns {Promise<Object>} Seller's products
+ */
+export const getSellerProducts = async (sellerId, page = 1, limit = 20) => {
+    const shop = await Shop.findOne({ sellerId });
+
+    if (!shop) {
+        throw new Error('No shop found for this seller');
+    }
+
+    const skip = (page - 1) * limit;
+
+    const [products, total] = await Promise.all([
+        Product.find({ shopId: shop._id })
+            .sort('-createdAt')
+            .skip(skip)
+            .limit(limit),
+        Product.countDocuments({ shopId: shop._id }),
+    ]);
+
+    return {
+        products,
+        pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.ceil(total / limit),
+        },
+    };
+};
+
+/**
+ * Update product (Seller only - must own the shop)
+ * @param {string} productId - Product ID
+ * @param {string} sellerId - Seller user ID
+ * @param {Object} updates - Fields to update
+ * @returns {Promise<Object>} Updated product
+ */
+export const updateProduct = async (productId, user, updates) => {
+    const product = await Product.findById(productId).populate('shopId');
+
+    if (!product) {
+        throw new Error('Product not found');
+    }
+
+    // Verify ownership
+    if (user.role !== 'admin' && product.shopId.sellerId.toString() !== user.userId) {
+        throw new Error('You can only update your own products');
+    }
+
+    // Prevent certain fields from being updated
+    delete updates.shopId;
+    delete updates.isBanned; // Only admin can ban
+
+    // Auto-update availability based on stock
+    if (updates.stock !== undefined) {
+        updates.isAvailable = updates.stock > 0;
+    }
+
+    // Update product
+    Object.assign(product, updates);
+    await product.save();
+
+    // Invalidate caches
+    await deleteCache(`product:${productId}`);
+    await deleteCachePattern('products:*');
+    await deleteCachePattern(`shop:${product.shopId._id}:products:*`);
+
+    return product;
+};
+
+/**
+ * Delete product (Seller only)
+ * @param {string} productId - Product ID
+ * @param {string} sellerId - Seller user ID
+ * @returns {Promise<boolean>} Success status
+ */
+export const deleteProduct = async (productId, user) => {
+    const product = await Product.findById(productId).populate('shopId');
+
+    if (!product) {
+        throw new Error('Product not found');
+    }
+
+    // Verify ownership
+    if (user.role !== 'admin' && product.shopId.sellerId.toString() !== user.userId) {
+        throw new Error('You can only delete your own products');
+    }
+
+    await product.deleteOne();
+
+    // Invalidate caches
+    await deleteCache(`product:${productId}`);
+    await deleteCachePattern('products:*');
+    await deleteCachePattern(`shop:${product.shopId._id}:products:*`);
+
+    return true;
+};
+
+/**
+ * Ban/Unban product (Admin only)
+ * @param {string} productId - Product ID
+ * @param {boolean} banned - Ban status
+ * @returns {Promise<Object>} Updated product
+ */
+export const toggleProductBan = async (productId, banned) => {
+    const product = await Product.findByIdAndUpdate(
+        productId,
+        { isBanned: banned },
+        { new: true }
+    );
+
+    if (!product) {
+        throw new Error('Product not found');
+    }
+
+    // Invalidate caches
+    await deleteCache(`product:${productId}`);
+    await deleteCachePattern('products:*');
+
+    return product;
+};
+
+/**
+ * Get all products (Admin only - including banned)
+ * @param {Object} filters - Filter options
+ * @returns {Promise<Object>} Products with pagination
+ */
+export const getAllProducts = async (filters = {}) => {
+    const { isBanned, page = 1, limit = 20 } = filters;
+    const skip = (page - 1) * limit;
+
+    const query = {};
+    if (isBanned !== undefined) {
+        query.isBanned = isBanned === 'true' || isBanned === true;
+    }
+
+    const [products, total] = await Promise.all([
+        Product.find(query)
+            .populate('shopId', 'shopName')
+            .sort('-createdAt')
+            .skip(skip)
+            .limit(limit),
+        Product.countDocuments(query),
+    ]);
+
+    return {
+        products,
+        pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.ceil(total / limit),
+        },
+    };
+};
+
+/**
+ * Get product comparisons (similar products from other sellers)
+ * @param {string} productId - Source product ID
+ * @returns {Promise<Array>} List of comparable products
+ */
+export const getComparisons = async (productId) => {
+    const product = await Product.findById(productId);
+    if (!product) {
+        throw new Error('Product not found');
+    }
+
+    const query = {
+        _id: { $ne: productId },
+        name: product.name,
+        isAvailable: true,
+        isBanned: false,
+        stock: { $gt: 0 }
+    };
+
+    if (product.brand) {
+        query.brand = product.brand;
+    }
+
+    const comparisons = await Product.find(query)
+        .populate('shopId', 'shopName rating location')
+        .sort('price')
+        .limit(10);
+
+    return comparisons;
+};
+
+/**
+ * Get personalized product comparison based on user's order history
+ * Analyzes past purchases to determine quality vs price preference
+ * @param {string} productId - Current product being viewed
+ * @param {string} userId - Logged-in user ID
+ * @returns {Promise<Object>} { currentProduct, similarProducts, userPreferences }
+ */
+export const getPersonalizedComparison = async (productId, userId) => {
+    // 1. Fetch the current product
+    const currentProduct = await Product.findById(productId)
+        .populate('shopId', 'shopName rating location');
+
+    if (!currentProduct) {
+        throw new Error('Product not found');
+    }
+
+    // 2. Analyze user's order history to build preference profile
+    let userPreferences = {
+        type: 'balanced',        // 'quality', 'price', or 'balanced'
+        avgSpend: 0,
+        totalOrders: 0,
+        preferredCategories: [],
+        preferredBrands: [],
+        priceWeight: 50,         // 0-100 scale (100 = fully price focused)
+        qualityWeight: 50,       // 0-100 scale (100 = fully quality focused)
+    };
+
+    if (userId) {
+        const userOrders = await Order.find({
+            customerId: userId,
+            status: { $in: ['completed', 'accepted', 'preparing', 'ready', 'pending'] },
+        })
+            .populate('items.productId', 'price discountedPrice category brand name')
+            .sort('-createdAt')
+            .limit(50)
+            .lean();
+
+        if (userOrders.length > 0) {
+            const purchasedProducts = [];
+            const categoryCount = {};
+            const brandCount = {};
+            let totalSpent = 0;
+
+            for (const order of userOrders) {
+                for (const item of order.items) {
+                    const prod = item.productId;
+                    if (!prod) continue;
+                    purchasedProducts.push(prod);
+                    totalSpent += item.price * item.quantity;
+
+                    // Track category frequency
+                    if (prod.category) {
+                        categoryCount[prod.category] = (categoryCount[prod.category] || 0) + 1;
+                    }
+                    // Track brand frequency
+                    if (prod.brand) {
+                        brandCount[prod.brand] = (brandCount[prod.brand] || 0) + 1;
+                    }
+                }
+            }
+
+            const avgSpend = purchasedProducts.length > 0
+                ? totalSpent / purchasedProducts.length
+                : 0;
+
+            // Get average price for same category products in DB
+            const categoryAvg = await Product.aggregate([
+                {
+                    $match: {
+                        category: currentProduct.category,
+                        isAvailable: true,
+                        isBanned: false,
+                    }
+                },
+                {
+                    $group: {
+                        _id: null,
+                        avgPrice: {
+                            $avg: {
+                                $cond: [
+                                    { $gt: ['$discountedPrice', 0] },
+                                    '$discountedPrice',
+                                    '$price'
+                                ]
+                            }
+                        },
+                    }
+                }
+            ]);
+
+            const marketAvgPrice = categoryAvg[0]?.avgPrice || avgSpend;
+
+            // Determine preference type
+            let priceWeight = 50;
+            let qualityWeight = 50;
+
+            if (avgSpend > marketAvgPrice * 1.2) {
+                // User tends to spend more → quality focused
+                qualityWeight = 75;
+                priceWeight = 25;
+            } else if (avgSpend < marketAvgPrice * 0.8) {
+                // User tends to spend less → price focused
+                priceWeight = 75;
+                qualityWeight = 25;
+            }
+
+            // Sort categories and brands by frequency
+            const sortedCategories = Object.entries(categoryCount)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([cat]) => cat);
+
+            const sortedBrands = Object.entries(brandCount)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([brand]) => brand);
+
+            userPreferences = {
+                type: qualityWeight > priceWeight ? 'quality' : priceWeight > qualityWeight ? 'price' : 'balanced',
+                avgSpend: Math.round(avgSpend),
+                totalOrders: userOrders.length,
+                preferredCategories: sortedCategories,
+                preferredBrands: sortedBrands,
+                priceWeight,
+                qualityWeight,
+            };
+        }
+    }
+
+    // 3. Find similar products for comparison
+    const currentEffectivePrice = currentProduct.discountedPrice || currentProduct.price;
+    const priceRange = currentEffectivePrice * 0.5; // ±50% price range
+
+    const similarQuery = {
+        _id: { $ne: productId },
+        category: currentProduct.category,
+        isAvailable: true,
+        isBanned: false,
+        stock: { $gt: 0 },
+        $or: [
+            {
+                discountedPrice: {
+                    $gte: currentEffectivePrice - priceRange,
+                    $lte: currentEffectivePrice + priceRange,
+                }
+            },
+            {
+                price: {
+                    $gte: currentEffectivePrice - priceRange,
+                    $lte: currentEffectivePrice + priceRange,
+                }
+            },
+        ],
+    };
+
+    // Sort based on user preference
+    let sortCriteria = '-createdAt'; // default
+    if (userPreferences.type === 'price') {
+        sortCriteria = 'price'; // cheapest first
+    } else if (userPreferences.type === 'quality') {
+        sortCriteria = '-price'; // premium first
+    }
+
+    let similarProducts = await Product.find(similarQuery)
+        .populate('shopId', 'shopName rating location')
+        .sort(sortCriteria)
+        .limit(6)
+        .lean();
+
+    // If not enough results, broaden search to same category without price filter
+    if (similarProducts.length < 3) {
+        const broaderQuery = {
+            _id: { $ne: productId },
+            category: currentProduct.category,
+            isAvailable: true,
+            isBanned: false,
+            stock: { $gt: 0 },
+        };
+
+        const existingIds = similarProducts.map(p => p._id.toString());
+
+        const moreProducts = await Product.find({
+            ...broaderQuery,
+            _id: { $nin: [productId, ...existingIds] },
+        })
+            .populate('shopId', 'shopName rating location')
+            .sort(sortCriteria)
+            .limit(6 - similarProducts.length)
+            .lean();
+
+        similarProducts = [...similarProducts, ...moreProducts];
+    }
+
+    return {
+        currentProduct,
+        similarProducts,
+        userPreferences,
+    };
+};
+
+/**
+ * Get featured products (Admin-curated collection)
+ * @param {number} limit - Max products to return
+ * @returns {Promise<Array>} Featured products
+ */
+export const getFeaturedProducts = async (limit = 10) => {
+    const cacheKey = `products:featured:${limit}`;
+    const cached = await getCache(cacheKey);
+    if (cached) return JSON.parse(cached);
+
+    const products = await Product.find({
+        isFeatured: true,
+        isAvailable: true,
+        isBanned: false,
+    })
+        .populate('shopId', 'shopName location rating')
+        .sort('-createdAt')
+        .limit(limit)
+        .lean();
+
+    await setCache(cacheKey, JSON.stringify(products), 300);
+    return products;
+};
+
+/**
+ * Get random products for discovery
+ * @param {number} limit - Number of random products
+ * @returns {Promise<Array>} Random products
+ */
+export const getRandomProducts = async (limit = 10) => {
+    const products = await Product.aggregate([
+        { $match: { isAvailable: true, isBanned: false, stock: { $gt: 0 } } },
+        { $sample: { size: limit } },
+        {
+            $lookup: {
+                from: 'shops',
+                localField: 'shopId',
+                foreignField: '_id',
+                as: 'shopId',
+                pipeline: [{ $project: { shopName: 1, location: 1, rating: 1 } }],
+            }
+        },
+        { $unwind: { path: '$shopId', preserveNullAndEmptyArrays: true } },
+    ]);
+
+    return products;
+};
+
+/**
+ * Toggle featured status (Admin only)
+ * @param {string} productId - Product ID
+ * @param {boolean} featured - Featured status
+ * @returns {Promise<Object>} Updated product
+ */
+export const toggleFeatured = async (productId, featured) => {
+    const product = await Product.findByIdAndUpdate(
+        productId,
+        { isFeatured: featured },
+        { new: true }
+    );
+
+    if (!product) {
+        throw new Error('Product not found');
+    }
+
+    await deleteCache(`product:${productId}`);
+    await deleteCachePattern('products:*');
+
+    return product;
+};
